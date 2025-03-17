@@ -1,0 +1,207 @@
+#Analyse the quality of the discretization when computing the distribution of admixture
+
+```{r}
+library(stringr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+```
+
+Aggregate the simulation data in one table.
+
+```{r warning=FALSE}
+baseDir <- "../distribution_cpp/output/comparaison_moment"
+
+#Initialisation
+scenarios <- c("Afr2P-Eur2P", "Afr2P-EurIN", "Afr2P-EurDE", "AfrIN-Eur2P", "AfrDE-Eur2P", "AfrIN-EurIN", "AfrIN-EurDE", "AfrDE-EurDE", "AfrDE-EurIN")
+discretizationStepList <- c(2^-(15), 2^-5, 2^-6, 2^-7, 2^-8, 2^-9, 2^-(10), 2^-(11), 2^-(12), 2^-(13), 2^-(14))
+nMoment   <- 40
+nScenario <- 9 
+nReplicat <- 100
+
+#Create scenario, discretization step and replicate columns
+Scenario_Column <- rep(scenarios, each = length(discretizationStepList)*nReplicat)
+Step_Column     <- rep(discretizationStepList, times = length(scenarios)*nReplicat)
+Replicat_Column <- rep(1:nReplicat, each = length(discretizationStepList), times = length(scenarios))
+
+#Make the dataframe empty and rename columns names of the moments
+integratedData  <- data.frame(Scenario=Scenario_Column, Step=Step_Column, Replicat=Replicat_Column, matrix(ncol=nMoment, nrow=length(Scenario_Column)))
+colnames(integratedData)[4:ncol(integratedData)] <- paste0("Moment_", seq_len(nMoment))
+
+#Loop over all scenarios folders
+for (scenarioDir in list.dirs(baseDir, recursive = FALSE)) {
+  temporaryDir <- file.path(baseDir, basename(scenarioDir))
+  
+  folder_names <- list.files(temporaryDir)
+  orderedSimNum <- as.numeric(sapply(str_split(folder_names, '_'),'[', 2))
+  
+  #Loop over all simulation folders
+  compteur = 1
+  
+  for (simulationDir in list.dirs(temporaryDir, recursive=FALSE)){
+    
+    #Extrract the data from simulations
+    filename <- paste(simulationDir,"/firstMoments_simu_", orderedSimNum[compteur],".txt", sep='')
+    dat <- read.table(filename, header = F, sep = ';', dec = ".")
+    
+    #Get row numbers of the scenario and replicat associated to the data we are fetching
+    scenarioName <- basename(scenarioDir)
+    rowIndex <- which(integratedData$Scenario == scenarioName & integratedData$Replicat == orderedSimNum[compteur])
+    
+    #Add the data to our integrated dataframe
+    integratedData[rowIndex, 4:ncol(integratedData)] <- dat[-1]
+    
+    compteur=compteur+1
+  }
+}
+```
+
+Compute the error between the moment with and without discretization
+
+```{r}
+#Extract reference step (number of points without discretisation)
+referenceStep <- 2^-(15)
+
+#Extract the rows that aren't discretised
+referenceData <- integratedData %>%
+  filter(Step == referenceStep) %>%
+  select(Scenario, Replicat, starts_with("Moment_")) %>%
+  rename_with(~ paste0("Ref_", .), starts_with("Moment_"))
+
+#Substract the associated reference row to the discretised rows from the same scenario and replicat
+differenceData <- integratedData %>%
+  group_by(Scenario, Replicat) %>%
+  mutate(across(starts_with("Moment_"), ~ . - .[Step == referenceStep], .names = "Diff_{.col}")) %>%
+  ungroup()
+```
+
+Make the table long
+
+```{r}
+# Select only columns that start with "Diff_Moment"
+differenceData_selected <- differenceData[is.finite(rowSums(differenceData[,-c(1,2,3)])),] %>% 
+  select(Scenario, Step, Replicat, starts_with("Diff_Moment")) %>% 
+  drop_na()
+
+# Reshape the selected data to long format
+longErrorData <- melt(differenceData_selected, 
+                      id.vars = c("Scenario", "Step", "Replicat"), 
+                      variable.name = "Moment", 
+                      value.name = "Error")
+
+#Change the variable moments to the number of the moments
+longErrorData$Moment <- as.numeric(sub("Diff_Moment_", "", longErrorData$Moment))
+```
+
+Plot the max error wrt to the discretization steps.
+
+```{r}
+#Compute the rescaled max errors
+longMaxErrorDataRescaled <- longErrorData %>%
+  group_by(Scenario, Step, Moment) %>%
+  summarise(MaxError = max(abs(Error) ^ (1/as.numeric(Moment))))
+
+#Choose specific Moments for clarity
+#selected_moments <- c(38, 39, 40)
+#filteredMaxErrorData <- longMaxErrorDataRescaled %>% filter(as.numeric(Moment) %in% selected_moments)
+
+# Sort by decreasing order and put labels
+step_levels <- sort(as.numeric(unique(longMaxErrorDataRescaled$Step)), decreasing = TRUE)
+power_labels <- parse(text = paste0("2^", log2(step_levels)))
+step_labels <- setNames(power_labels, as.character(step_levels))
+
+#Trnasform step as a sorted factor
+longMaxErrorDataRescaled$Step <- factor(longMaxErrorDataRescaled$Step, levels = step_levels)
+
+#Plot max facet
+max_error_facet = ggplot(longMaxErrorDataRescaled, aes(x = Step, y = MaxError, color = as.factor(Moment), group = Moment)) +
+  geom_line() + 
+  geom_point() +
+  labs(x = "Bin sizes",
+       y = "Max Absolute Errors",
+       color = "Moment") +
+  theme_minimal() +
+  scale_x_discrete(labels = step_labels) +
+  facet_wrap(~ Scenario) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#Display
+max_error_facet
+
+#Save image
+ggsave(file="error_max_facet.png", plot=max_error_facet, width = 10, height = 5, device='png', dpi=390)
+```
+
+Now getting the distribution of errors wrt to the discretization steps
+
+```{r}
+#Compute the rescaled errors
+longErrorDataRescaled <- longErrorData %>%
+  group_by(Scenario, Step, Replicat) %>%
+  mutate(Error = abs(Error) ^ (1/as.numeric(Moment)))
+
+#Choose specific Moments for clarity
+selected_moments_firsts <- c(1, 2, 3, 4, 5)
+selected_moments_lasts <- c(20, 25, 30, 35, 40)
+filteredErrorData_firsts <- longErrorDataRescaled %>% filter(as.numeric(Moment) %in% selected_moments_firsts)
+filteredErrorData_lasts <- longErrorDataRescaled %>% filter(as.numeric(Moment) %in% selected_moments_lasts)
+
+# Sort Step levels in descending order
+step_levels <- sort(as.numeric(unique(filteredErrorData_lasts$Step)), decreasing = TRUE)
+power_labels <- parse(text = paste0("2^", log2(step_levels)))
+step_labels <- setNames(power_labels, as.character(step_levels))
+
+# Convert Step into an ordered factor in both datasets
+filteredErrorData_firsts$Step <- factor(filteredErrorData_firsts$Step, levels = step_levels)
+filteredErrorData_lasts$Step <- factor(filteredErrorData_lasts$Step, levels = step_levels)
+
+# Plot distribution of error for one scenario, here AfrDE-EurDE
+DE_DE_error = ggplot(filteredErrorData_firsts[filteredErrorData_firsts$Scenario == "AfrDE-EurDE",], 
+                     aes(x = Step, y = Error, color = as.factor(Moment))) +
+  geom_boxplot(outliers=FALSE) +
+  labs(title = "",
+       x = "Bin sizes",
+       y = "Errors",
+       color = "Moment") +
+  theme_minimal() +
+  scale_x_discrete(labels = step_labels) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plot distribution facet for first moments
+distribution_error_facet_1_5 = ggplot(filteredErrorData_firsts, 
+                                      aes(x = Step, y = Error, color = as.factor(Moment))) +
+  geom_boxplot(outliers=FALSE) +
+  labs(title = "",
+       x = "Bin sizes",
+       y = "Errors",
+       color = "Moment") +
+  theme_minimal() +
+  scale_x_discrete(labels = step_labels) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~ Scenario) 
+
+# Plot distribution facet for last moments
+distribution_error_facet_20_40 = ggplot(filteredErrorData_lasts, 
+                                        aes(x = Step, y = Error, color = as.factor(Moment))) +
+  geom_boxplot(outliers=FALSE) +
+  labs(title = "",
+       x = "Bin sizes",
+       y = "Errors",
+       color = "Moment") +
+  theme_minimal() +
+  scale_x_discrete(labels = step_labels) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  facet_wrap(~ Scenario)
+
+
+#Display
+DE_DE_error
+distribution_error_facet_1_5
+distribution_error_facet_20_40
+
+#save plots
+ggsave(file="error_distribution_facet_1-5.png", plot=distribution_error_facet_1_5, width = 10, height = 5, device='png', dpi=390)
+ggsave(file="error_distribution_facet_20-40.png", plot=distribution_error_facet_20_40, width = 10, height = 5, device='png', dpi=390)
+ggsave(file="error_distribution_AfrDE-EurDE.png", plot=DE_DE_error, width = 5, height = 3, device='png', dpi=390)
+```

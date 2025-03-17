@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/MyExecutable.dir/src/main.cpp.o -o MyExecutable  /usr/lib/x86_64-linux-gnu/libpython3.10.so 

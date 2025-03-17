@@ -1,0 +1,7 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+output/
+10000Sims9ModPap1.2_SumstatsAll.txt
+matplotlibcpp

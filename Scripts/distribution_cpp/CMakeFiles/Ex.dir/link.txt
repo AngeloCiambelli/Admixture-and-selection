@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/Ex.dir/src/main.cpp.o -o Ex  -lPython3.10::Python -lother_libraries 

@@ -1,0 +1,273 @@
+#Test link cpp and R
+
+This script tries to link the cpp and R file to access simulated distribution output in R.
+
+load data of the simulation all scenarios
+
+```{r warning=FALSE}
+scenarios = c()
+data = data.frame()
+getwd()
+baseDir <- "../distribution_cpp/output/fortes_lima_nStep=4097"
+
+#Loop over all scenarios folders
+for (scenarioDir in list.dirs(baseDir, recursive = FALSE)) {
+  scenario = basename(scenarioDir)
+  scenarios = append(scenarios,scenario)
+  #Extract the data from simulations
+  filename <- paste(baseDir,"/",scenario,"/",scenario,"sumStat.txt", sep='')
+  dat <- read.table(filename, header = F, sep = ';', dec = ".")
+  
+  data = rbind(data, dat)
+}
+ncol(data)
+```
+
+Add labels and combine the different models simulations to train abcrf from Verdu.
+
+```{r}
+data$model = rep(scenarios, each = 10000)
+head(data)
+```
+
+```{r}
+# Plot confusion matrix
+library(ggplot2)
+library(reshape2)
+library(svglite)
+library(abcrf)
+library(dplyr)
+
+# Split data into model identifiers (first column) and summary statistics
+model_identifiers <- as.factor(data[, 18])  # Convert model IDs to a factor
+summary_stats <- data[, -c(1,18)] #Remove labels and id and min (because min not enough different between models)
+
+#Merge into a new dataframe and keep only rows without NA and Inf
+data = data.frame(model_identifiers, summary_stats)
+finalData = data[complete.cases(data),]
+finalData <- finalData[is.finite(rowSums(finalData[, -c(1)])),]
+
+#Check the distribution of the removed rows among the scenarios
+finalData %>% count(model_identifiers)
+print(finalData)
+
+#Fit the model
+fit <- abcrf(model_identifiers ~ ., data = finalData, ntree=1000, paral=TRUE, ncores=8, sampsize=8000)
+
+#Print a summary of the trained model
+print(fit)
+
+#Compute OOB errors wrt number of trees
+OOB_errors = err.abcrf(object = fit, training = finalData, paral=TRUE, ncores = 8)
+
+#Make the confusion matrix
+conf_matrix <- fit$model.rf$confusion.matrix
+conf_matrix_df <- as.data.frame(as.table(conf_matrix))
+
+#Compute percentage of errors
+conf_matrix_df <- conf_matrix_df[conf_matrix_df$Var2!="class.error",] %>%
+  group_by(Var1) %>%
+  mutate(Percentage = round(Freq / sum(Freq)*100, digits=1))
+
+#Order  of display
+scenario_order <- c("Afr2P-Eur2P", "AfrDE-Eur2P", "AfrIN-Eur2P", "Afr2P-EurDE", "AfrDE-EurDE", "AfrIN-EurDE", "Afr2P-EurIN", "AfrDE-EurIN", "AfrIN-EurIN")
+
+#Plot the confusion matrix
+conf_mat = ggplot(conf_matrix_df, aes(x = Var1, y = Var2, fill = Percentage)) +
+  geom_tile() +
+  geom_text(aes(label = Percentage), color = "black", size = 4) +
+  scale_fill_gradient(limits = c(0,100), low = "white", high = "darkolivegreen3") +
+  scale_x_discrete(limits = scenario_order) +
+  scale_y_discrete(limits = scenario_order) + 
+  labs(x = "True model",
+       y = "ABC-RF Predicted model",
+       fill = "Percentage") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, size = 10, hjust = 1), axis.title = element_text(size = 16)) 
+
+conf_mat
+ggsave(file="conf_mat.png", plot=conf_mat, width = 10, height = 5, device='png', dpi=390)
+```
+
+
+```{r}
+# Load test to find simulations
+filename_ASW = "../../Data/SummaryStats/final_sumstats_ASW.txt"
+filename_ACB = "../../Data/SummaryStats/final_sumstats_ACB.txt"
+data_obs_ASW = read.table(filename_ASW, header = T, sep = ' ', dec = ".")
+data_obs_ACB = read.table(filename_ACB, header = T, sep = ' ', dec = ".")
+
+print(data_obs_ASW[,c(29:44)]) #16 sum stat of interest
+```
+
+
+```{r}
+#Predict the scenario
+data_obs_ordered_ASW = data_obs_ASW[,c(29,30,31,32,33,34,44,35,36,37,38,39,40,41,42,43)]
+data_obs_ordered_ACB = data_obs_ACB[,c(29,30,31,32,33,34,44,35,36,37,38,39,40,41,42,43)]
+colnames(data_obs_ordered_ASW) = c("V2","V3","V4","V5","V6","V7","V8","V9","V10","V11","V12","V13","V14","V15","V16","V17")
+colnames(data_obs_ordered_ACB) = c("V2","V3","V4","V5","V6","V7","V8","V9","V10","V11","V12","V13","V14","V15","V16","V17")
+
+predicted_params_ASW <- predict(fit, obs = data_obs_ordered_ASW, training = finalData, paral=TRUE, ncores = 8)
+predicted_params_ACB <- predict(fit, obs = data_obs_ordered_ACB, training = finalData, paral=TRUE, ncores = 8)
+print(predicted_params_ASW)
+print(predicted_params_ACB)
+
+#Make a long table and change colnames
+predicted_params_long_ASW = melt(predicted_params_ASW$vote)[,-1]
+colnames(predicted_params_long_ASW) <- c("model", "votes")
+
+predicted_params_long_ACB = melt(predicted_params_ACB$vote)[,-1]
+colnames(predicted_params_long_ACB) <- c("model", "votes")
+
+# Plot
+prediction_fl_ASW = ggplot(predicted_params_long_ASW, aes(x = model, y = votes, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Model", y = "Number of Votes", title = "Votes per Scenarios") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+prediction_fl_ACB = ggplot(predicted_params_long_ACB, aes(x = model, y = votes, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Model", y = "Number of Votes", title = "Votes per Scenarios") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+ggsave(file="vote_ASW.png", plot=prediction_fl_ASW, width = 10, height = 5, device='png', dpi=390)
+ggsave(file="vote_ACB.png", plot=prediction_fl_ACB, width = 10, height = 5, device='png', dpi=390)
+```
+
+
+Here we plot the abcrf to verify the condition of application
+```{r}
+ASW_plot_LDA = plot(fit, training =finalData, obs = data_obs_ordered_ASW)
+ACB_plot_LDA = plot(fit, training =finalData, obs = data_obs_ordered_ACB)
+
+ASW_plot_LDA
+ACB_plot_LDA
+```
+# Inference with selection
+
+```{r warning=FALSE}
+scenarios = c()
+data_sel = data.frame()
+getwd()
+baseDir <- "../distribution_cpp/output/Selection_nStep=4097"
+
+#Loop over all scenarios folders
+for (scenarioDir in list.dirs(baseDir, recursive = FALSE)) {
+  scenario = basename(scenarioDir)
+  scenarios = append(scenarios,scenario)
+  #Extract the data from simulations
+  filename <- paste(baseDir,"/",scenario,"/",scenario,"sumStat.txt", sep='')
+  dat <- read.table(filename, header = F, sep = ';', dec = ".")
+  
+  data_sel = rbind(data_sel, dat)
+}
+print(data_sel)
+```
+
+```{r}
+# Plot confusion matrix
+library(ggplot2)
+library(reshape2)
+library(svglite)
+library(abcrf)
+library(dplyr)
+
+#add column of scenario
+data_sel$model = rep(scenarios, each = 10000)
+
+# Split data into model identifiers (first column) and summary statistics
+model_identifiers <- as.factor(data_sel[, 18])  # Convert model IDs to a factor
+summary_stats <- data_sel[, -c(1,7,8,18)] #Remove labels and id and min (because min not enough different between models)
+
+#Merge into a new dataframe and keep only rows without NA and Inf
+data_sel = data.frame(model_identifiers, summary_stats)
+finalData = data_sel[complete.cases(data_sel),]
+finalData <- finalData[is.finite(rowSums(finalData[, -c(1)])),]
+
+#Check the distribution of the removed rows among the scenarios
+finalData %>% count(model_identifiers)
+
+#Fit the model
+fit_sel <- abcrf(model_identifiers ~ ., data = finalData, ntree=1000, paral=TRUE, ncores=8, sampsize=8000)
+
+#Print a summary of the trained model
+print(fit_sel)
+
+#Compute OOB errors wrt number of trees
+#OOB_errors = err.abcrf(object = fit, training = finalData, paral=TRUE, ncores = 8)
+
+#Make the confusion matrix
+conf_matrix_sel <- fit_sel$model.rf$confusion.matrix
+conf_matrix_df_sel <- as.data.frame(as.table(conf_matrix_sel))
+
+#Compute percentage of errors
+conf_matrix_df_sel <- conf_matrix_df_sel[conf_matrix_df_sel$Var2!="class.error",] %>%
+  group_by(Var1) %>%
+  mutate(Percentage = round(Freq / sum(Freq)*100, digits=1))
+
+#Plot the confusion matrix
+conf_mat_sel = ggplot(conf_matrix_df_sel, aes(x = Var1, y = Var2, fill = Percentage)) +
+  geom_tile() +
+  geom_text(aes(label = Percentage), color = "black", size = 4) +
+  scale_fill_gradient(limits = c(0,100), low = "white", high = "darkolivegreen3") +
+  labs(x = "True model",
+       y = "ABC-RF Predicted model",
+       fill = "Percentage") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, size = 10, hjust = 1), axis.title = element_text(size = 16)) 
+
+conf_mat_sel
+ggsave(file="conf_mat_sel.png", plot=conf_mat_sel, width = 10, height = 5, device='png', dpi=390)
+```
+
+Inference of the scenario with selection
+
+```{r}
+#Predict the scenario
+data_obs_ordered_ASW_sel = data_obs_ASW[,c(29,30,31,32,33,35,36,37,38,39,40,41,42,43)]
+data_obs_ordered_ACB_sel = data_obs_ACB[,c(29,30,31,32,33,35,36,37,38,39,40,41,42,43)]
+colnames(data_obs_ordered_ASW_sel) = c("V2","V3","V4","V5","V6","V9","V10","V11","V12","V13","V14","V15","V16","V17")
+colnames(data_obs_ordered_ACB_sel) = c("V2","V3","V4","V5","V6","V9","V10","V11","V12","V13","V14","V15","V16","V17")
+
+predicted_params_ASW_sel <- predict(fit_sel, obs = data_obs_ordered_ASW_sel, training = finalData, paral=TRUE, ncores = 8)
+predicted_params_ACB_sel <- predict(fit_sel, obs = data_obs_ordered_ACB_sel, training = finalData, paral=TRUE, ncores = 8)
+print(predicted_params_ASW_sel)
+print(predicted_params_ACB_sel)
+
+#Make a long table and change colnames
+predicted_params_long_ASW_sel = melt(predicted_params_ASW_sel$vote)[,-1]
+colnames(predicted_params_long_ASW_sel) <- c("model", "votes")
+
+predicted_params_long_ACB_sel = melt(predicted_params_ACB_sel$vote)[,-1]
+colnames(predicted_params_long_ACB_sel) <- c("model", "votes")
+
+#Plots
+prediction_ASW_sel = ggplot(predicted_params_long_ASW_sel, aes(x = model, y = votes, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Model", y = "Number of Votes", title = "Votes per Scenarios") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+prediction_ACB_sel = ggplot(predicted_params_long_ACB_sel, aes(x = model, y = votes, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Model", y = "Number of Votes", title = "Votes per Scenarios") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+ggsave(file="vote_ASW_sel.png", plot=prediction_ASW_sel, width = 10, height = 5, device='png', dpi=390)
+ggsave(file="vote_ACB_sel.png", plot=prediction_ACB_sel, width = 10, height = 5, device='png', dpi=390)
+```
+
+
+Here we plot the abcrf to verify the condition of application
+```{r}
+ASW_plot_LDA_sel = plot(fit_sel, training =finalData, obs = data_obs_ordered_ASW_sel)
+ACB_plot_LDA_sel = plot(fit_sel, training =finalData, obs = data_obs_ordered_ACB_sel)
+
+ASW_plot_LDA_sel
+ACB_plot_LDA_sel
+
+```

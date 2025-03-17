@@ -1,0 +1,118 @@
+---
+title: "fortes_lima_data_abc_rf"
+output: html_document
+date: "2025-03-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Plot confusion matrix
+library(ggplot2)
+library(reshape2)
+library(svglite)
+library(abcrf)
+library(dplyr)
+```
+
+```{r}
+dat <- read.table("10000Sims9ModPap1.2_SumstatsAll.txt", header = T, sep = '\t', dec = ".")
+index <- read.table("10000Sims9ModPap1.2_MODINDEX.txt", header = T, sep = '\t', dec = ".")
+
+ncol(dat)
+```
+
+```{r}
+# Split data into model identifiers (first column) and summary statistics
+model_identifiers <- as.factor(index$x)  # Convert model IDs to a factor
+summary_stats <- dat[, c(29,30,31,32,33,34,44,35,36,37,38,39,40,41,42,43)] #Remove labels and id and min (because min not enough different between models)
+
+#Merge into a new dataframe and keep only rows without NA and Inf
+data = data.frame(model_identifiers, summary_stats)
+finalData = data[complete.cases(data),]
+finalData <- finalData[is.finite(rowSums(finalData[, -c(1)])),]
+
+#Check the distribution of the removed rows among the scenarios
+finalData %>% count(model_identifiers)
+print(finalData)
+
+#Fit the model
+fit <- abcrf(model_identifiers ~ ., data = finalData, ntree=1000, paral=TRUE, ncores=8, sampsize=8000)
+
+#Print a summary of the trained model
+print(fit)
+
+#Compute OOB errors wrt number of trees
+#OOB_errors = err.abcrf(object = fit, training = finalData, paral=TRUE, ncores = 8)
+
+#Make the confusion matrix
+conf_matrix <- fit$model.rf$confusion.matrix
+conf_matrix_df <- as.data.frame(as.table(conf_matrix))
+
+#Compute percentage of errors
+conf_matrix_df <- conf_matrix_df[conf_matrix_df$Var2!="class.error",] %>%
+  group_by(Var1) %>%
+  mutate(Percentage = round(Freq / sum(Freq)*100, digits=1))
+
+#Plot the confusion matrix
+conf_mat = ggplot(conf_matrix_df, aes(x = Var1, y = Var2, fill = Percentage)) +
+  geom_tile() +
+  geom_text(aes(label = Percentage), color = "black", size = 4) +
+  scale_fill_gradient(limits = c(0,100), low = "white", high = "darkolivegreen3") +
+  labs(x = "True model",
+       y = "ABC-RF Predicted model",
+       fill = "Percentage") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, size = 10, hjust = 1), axis.title = element_text(size = 16)) 
+
+conf_mat
+ggsave(file="conf_mat_FortesLimaData.png", plot=conf_mat, width = 10, height = 5, device='png', dpi=390)
+```
+
+```{r}
+# Load test to find simulations
+filename_ASW = "../../Data/SummaryStats/final_sumstats_ASW.txt"
+filename_ACB = "../../Data/SummaryStats/final_sumstats_ACB.txt"
+data_obs_ASW = read.table(filename_ASW, header = T, sep = ' ', dec = ".")
+data_obs_ACB = read.table(filename_ACB, header = T, sep = ' ', dec = ".")
+
+print(data_obs_ASW[,c(29:44)]) #16 sum stat of interest
+```
+
+
+```{r}
+#Predict the scenario
+data_obs_ordered_ASW = data_obs_ASW[,c(29,30,31,32,33,34,44,35,36,37,38,39,40,41,42,43)]
+data_obs_ordered_ACB = data_obs_ACB[,c(29,30,31,32,33,34,44,35,36,37,38,39,40,41,42,43)]
+
+predicted_params_ASW <- predict(fit, obs = data_obs_ordered_ASW, training = finalData, paral=TRUE, ncores = 8)
+predicted_params_ACB <- predict(fit, obs = data_obs_ordered_ACB, training = finalData, paral=TRUE, ncores = 8)
+print(predicted_params_ASW)
+print(predicted_params_ACB)
+
+#Make a long table and change colnames
+predicted_params_long_ASW = melt(predicted_params_ASW$vote)[,-1]
+colnames(predicted_params_long_ASW) <- c("model", "votes")
+
+predicted_params_long_ACB = melt(predicted_params_ACB$vote)[,-1]
+colnames(predicted_params_long_ACB) <- c("model", "votes")
+
+# Plot
+prediction_fl_ASW = ggplot(predicted_params_long_ASW, aes(x = as.factor(model), y = votes, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Model", y = "Number of Votes", title = "Votes per Scenarios") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+prediction_fl_ACB = ggplot(predicted_params_long_ACB, aes(x = as.factor(model), y = votes, fill = model)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Model", y = "Number of Votes", title = "Votes per Scenarios") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+ggsave(file="vote_ASW_FortesLimaData.png", plot=prediction_fl_ASW, width = 10, height = 5, device='png', dpi=390)
+ggsave(file="vote_ACB_FortesLimaData.png", plot=prediction_fl_ACB, width = 10, height = 5, device='png', dpi=390)
+```
+
